@@ -44,7 +44,7 @@ from pdf_extractor import extract_from_fayda_pdf
 # ══════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
 # ══════════════════════════════════════════════════════════════
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8878628793:AAHeQh372w5GFdGx6PAK5SlY4Mw_bL19B48")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8698651344:AAHhPzcTFBzdnFENBjECdCN4gZ9y5zJuzag")
 ADMIN_USERNAME = "dhtechs_admin"
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
