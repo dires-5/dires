@@ -600,11 +600,12 @@ def _extract_fin_from_card_back(card_back_img: "Image.Image", pdf_bytes: bytes =
     # ── Layer 3: embedded card-back JPEG → pytesseract ────────────────────────
     #
     # When the card-back is an embedded JPEG (1968×3150 px typical), the FIN
-    # row sits at approximately the same relative position.  We try the same
-    # y-range sweep on that image directly.
+    # row sits at y: 62%–67% of the JPEG height — this differs from the full-
+    # page PDF render (57%–60%) because the JPEG is cropped to the card-back
+    # panel only, so coordinates shift downward.  Confirmed on real IDs.
     try:
         cw, ch = card_back_img.size
-        for y0, y1 in [(0.570, 0.596), (0.555, 0.610), (0.540, 0.625)]:
+        for y0, y1 in [(0.620, 0.670), (0.605, 0.685), (0.590, 0.700), (0.570, 0.720)]:
             strip = card_back_img.crop((int(cw * 0.55), int(ch * y0), cw, int(ch * y1)))
             # Upscale small strips so tesseract has enough pixels
             sw, sh = strip.size
@@ -616,8 +617,6 @@ def _extract_fin_from_card_back(card_back_img: "Image.Image", pdf_bytes: bytes =
             if result:
                 print(f"[fin] Layer-3 (card JPEG y={y0:.3f}-{y1:.3f}) SUCCESS: {result}")
                 return result
-    except ImportError:
-        print("[fin] Layer-3 skipped: pytesseract not installed")
     except Exception as e:
         print(f"[fin] Layer-3 error: {e}")
 
@@ -780,9 +779,13 @@ def extract_from_fayda_pdf(pdf_bytes: bytes) -> dict:
 
     # ── Step 5: Build api_data  ───────────────────────────────────────────────
     api_data = _build_api_data(parsed, photo_b64, qr_data, qr_crop_b64)
-    # Ensure FIN is in api_data — from OCR or text-layer fallback.
-    # Last resort: derive from FCN (Fayda FIN = last 12 digits of the FCN).
+    # Ensure FIN is in api_data — from OCR, text layer, or derived from FCN.
+    # Last resort: Fayda FIN = last 12 digits of the 16-digit FCN.
+    fcn = parsed.get("fcn", "")
     best_fin = fin_value or parsed.get("fin", "")
+    if not best_fin and len(fcn) >= 12:
+        best_fin = fcn[-12:]
+        print(f"[fin] FCN-derived fallback: {best_fin}")
     if best_fin:
         api_data["fin"] = best_fin
     result["fin"] = best_fin

@@ -44,7 +44,7 @@ from pdf_extractor import extract_from_fayda_pdf
 # ══════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
 # ══════════════════════════════════════════════════════════════
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8974652061:AAEu_MrjMGsYJ9bDDZSce2COYPhFdMo-OA0")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8152344764:AAE_IiYZZO9Bg__lXykuGD5YkNjq-zZ0KcQ")
 ADMIN_USERNAME = "dhtechs_admin"
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
@@ -791,9 +791,9 @@ def _api_validate_otp(otp: str, fcn: str, transaction_id: str) -> dict:
                 or ""
             ),
 
-            # FIN is the same as UIN (12-digit Fayda ID Number on the card).
-            # Set it explicitly so app.py merge_to_template renders the FIN
-            # strip correctly without falling back to FCN-derived guesses.
+            # FIN is the 12-digit Fayda ID Number shown on the card face.
+            # In the OTP flow the Fayda API returns it under the key "uin".
+            # (The 16-digit card number is in "uniqueId"/"fcn" — different field.)
             "fin": (
                 identity_data.get("uin")
                 or identity_data.get("UIN")
@@ -2107,8 +2107,11 @@ async def recv_pdf_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await _cancel(update, context)
 
     # ── Inject FIN into api_data so merge_to_template can render it ──────────
+    # pdf_fin is the OCR-extracted FIN saved at PDF-upload time.
+    # Always prefer it — the QR decode path may have set api_data["fin"] to ""
+    # or to the wrong 16-digit UIN value.
     pdf_fin = context.user_data.get("pdf_fin", "")
-    if pdf_fin and not api_data.get("fin"):
+    if pdf_fin:
         api_data["fin"] = pdf_fin
 
     cfg = TEMPLATES.get(tid, TEMPLATES[3])
