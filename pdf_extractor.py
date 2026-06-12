@@ -495,7 +495,7 @@ def _crop_qr_from_card_back(card_back_img: "Image.Image") -> "Image.Image":
     Small extra padding added so finder squares are never clipped.
     """
     w, h = card_back_img.size
-    box = (int(w * 0.08), int(h * 0.10),  int(w * 0.92), int(h * 0.60))
+    box = (int(w * 0.08), int(h * 0.10), int(w * 0.92), int(h * 0.67))
     return card_back_img.crop(box)
 
 
