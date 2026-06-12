@@ -59,11 +59,6 @@ DB_PATH = "fayda_bot.db"
 BASE_URL = "https://card-order.fayda.et"
 PORTAL = "https://card-order.fayda.et"
 
-# ── Channel membership requirement ────────────────────────────
-REQUIRED_CHANNEL = "@etdigitalsolution"          # username WITH @
-REQUIRED_CHANNEL_URL = "https://t.me/etdigitalsolution"
-REQUIRED_CHANNEL_DISPLAY = "ET Digital Solution"
-
 # Next.js action header
 NEXT_ACTION = "7052d679ced55e283f5f594732344424501447e91e"
 
@@ -384,24 +379,6 @@ def is_admin(update):
         return True
     aid = get_admin_chat_id()
     return aid != 0 and u.id == aid
-
-# ══════════════════════════════════════════════════════════════
-#  📡  CHANNEL MEMBERSHIP CHECK
-# ══════════════════════════════════════════════════════════════
-async def is_channel_member(bot, user_id: int) -> bool:
-    """Return True if user_id is a member/admin/creator of REQUIRED_CHANNEL."""
-    try:
-        member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
-        return member.status in ("member", "administrator", "creator")
-    except Exception as e:
-        log.debug(f"Channel membership check failed for {user_id}: {e}")
-        return False
-
-def _join_channel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("📢 Join Channel", url=REQUIRED_CHANNEL_URL),
-        InlineKeyboardButton("✅ I've Joined", callback_data="check_membership"),
-    ]])
 
 # ══════════════════════════════════════════════════════════════
 #  🖨️  A4 CORE FUNCTIONS
@@ -1025,25 +1002,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_admin_chat_id(u.id)
             log.info(f"👑 Admin registered: {u.id}")
 
-    # ── Channel membership gate (skip for admin) ────────────────────────────
-    if not is_admin(update):
-        joined = await is_channel_member(context.bot, u.id)
-        if not joined:
-            await update.message.reply_text(
-                f"🇪🇹 <b>ሰላም፣ {u.first_name}!</b>  Welcome to Fayda ID Bot\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "🔐 <b>One quick step before you start:</b>\n\n"
-                f"📢 Please join our official channel\n"
-                f"   <b>{REQUIRED_CHANNEL_DISPLAY}</b>\n"
-                f"   {REQUIRED_CHANNEL_URL}\n\n"
-                "After joining, tap <b>✅ I've Joined</b> below\n"
-                "to unlock all bot features!\n"
-                "━━━━━━━━━━━━━━━━━━━━━━",
-                parse_mode=ParseMode.HTML,
-                reply_markup=_join_channel_keyboard()
-            )
-            return
-
     if is_admin(update):
         await update.message.reply_text(
             "👑 <b>ADMIN PANEL</b> — Fayda ID Bot\n"
@@ -1085,58 +1043,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "👇 <b>Choose an option below to get started!</b>",
         reply_markup=user_menu(), parse_mode=ParseMode.HTML)
-
-# ══════════════════════════════════════════════════════════════
-#  ✅  CHECK MEMBERSHIP CALLBACK  ("I've Joined" button)
-# ══════════════════════════════════════════════════════════════
-async def cb_check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    u = query.from_user
-    joined = await is_channel_member(context.bot, u.id)
-    if not joined:
-        await query.answer(
-            f"❌ You haven't joined {REQUIRED_CHANNEL} yet!\nPlease join first then tap ✅ I've Joined.",
-            show_alert=True
-        )
-        return
-    # Membership confirmed — show the normal start menu
-    loop = asyncio.get_running_loop()
-    user = await loop.run_in_executor(None, _db_get_user, u.id)
-    tid = user.get("template_id", 3) or 3
-    tname = TEMPLATES.get(tid, TEMPLATES[3])["name"]
-    trials_left = FREE_TRIALS - user["trials_used"]
-    if trials_left > 0:
-        status_line = f"🎁 <b>Free Trial Available!</b>\n   You have <b>{trials_left}</b> free generation(s) ready to use!"
-        status_icon = "🟢"
-    else:
-        birr = user["wallet"]
-        otp_gens = birr // PRICE_OTP
-        pdf_gens = birr // PRICE_PDF
-        status_icon = "🟡" if birr > 0 else "🔴"
-        status_line = (f"💳 <b>Wallet Balance:</b> {birr} ETB\n"
-                       f"   🪪 OTP cards: <b>{otp_gens}</b> | 📄 PDF cards: <b>{pdf_gens}</b>")
-    await query.edit_message_text(
-        f"✅ <b>Welcome aboard, {u.first_name}!</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🪪 Generate your <b>official Fayda Digital ID</b> card\n"
-        "   in seconds using the Fayda API.\n\n"
-        f"{status_icon} <b>Your Status:</b>\n"
-        f"{status_line}\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎨 <b>Current Template:</b> #{tid} — {tname}\n"
-        f"   (Each template gives Color + Grayscale output)\n\n"
-        f"💵 <b>Price:</b> OTP flow {PRICE_OTP} ETB | PDF flow {PRICE_PDF} ETB\n"
-        f"📱 <b>TeleBirr:</b> <code>{PAYMENT_PHONE}</code>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "👇 <b>Use the menu buttons below to get started!</b>",
-        parse_mode=ParseMode.HTML
-    )
-    await context.bot.send_message(
-        u.id,
-        "👇 Choose an option from the menu:",
-        reply_markup=user_menu()
-    )
 
 # ══════════════════════════════════════════════════════════════
 #  🎨  TEMPLATE SELECTION
@@ -1245,17 +1151,6 @@ async def start_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _db_upsert_user, u.id, u.username, u.full_name)
-
-    # ── Channel gate ────────────────────────────────────────────────────────
-    if not is_admin(update) and not await is_channel_member(context.bot, u.id):
-        await update.message.reply_text(
-            f"📢 <b>Join Required</b>\n\n"
-            f"Please join <b>{REQUIRED_CHANNEL_DISPLAY}</b> first to use this feature.\n"
-            f"{REQUIRED_CHANNEL_URL}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=_join_channel_keyboard()
-        )
-        return ConversationHandler.END
 
     can = await loop.run_in_executor(None, _db_can_generate, u.id, PRICE_OTP)
     if not can:
@@ -2107,17 +2002,6 @@ async def start_pdf_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _db_upsert_user, u.id, u.username, u.full_name)
 
-    # ── Channel gate ────────────────────────────────────────────────────────
-    if not is_admin(update) and not await is_channel_member(context.bot, u.id):
-        await update.message.reply_text(
-            f"📢 <b>Join Required</b>\n\n"
-            f"Please join <b>{REQUIRED_CHANNEL_DISPLAY}</b> first to use this feature.\n"
-            f"{REQUIRED_CHANNEL_URL}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=_join_channel_keyboard()
-        )
-        return ConversationHandler.END
-
     can = await loop.run_in_executor(None, _db_can_generate, u.id, PRICE_PDF)
     if not can:
         has_pending = await loop.run_in_executor(None, _db_has_pending, u.id)
@@ -2599,9 +2483,6 @@ def build_app():
     app.add_handler(CallbackQueryHandler(cb_template_select, pattern=r"^tpl_select:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_template_preview_menu, pattern=r"^tpl_preview_menu$"))
     app.add_handler(CallbackQueryHandler(cb_template_back, pattern=r"^tpl_back$"))
-
-    # Channel membership check callback
-    app.add_handler(CallbackQueryHandler(cb_check_membership, pattern=r"^check_membership$"))
 
     # Payment / A4 flip callbacks
     app.add_handler(CallbackQueryHandler(cb_payment, pattern=r"^pay_(ok|no):\d+$"))
