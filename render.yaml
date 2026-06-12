@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: fayda-id-bot
+    runtime: python
+    buildCommand: apt-get update && apt-get install -y tesseract-ocr poppler-utils libzbar0 libzbar-dev && pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false        # set this in Render dashboard
+      - key: ADMIN_CHAT_ID
+        sync: false        # set this in Render dashboard
+    disk:
+      name: bot-data
+      mountPath: /opt/render/project/src
+      sizeGB: 1

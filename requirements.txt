@@ -1,0 +1,17 @@
+python-telegram-bot==21.6
+requests>=2.31
+Pillow>=10.0
+qrcode[pil]>=7.4
+python-barcode>=0.15
+rembg>=2.0.50
+flask>=3.0
+flask-cors>=4.0
+numpy>=1.24
+pyzbar>=0.1.9
+opencv-python-headless>=4.8
+PyMuPDF>=1.23.0
+pytesseract>=0.3.10
+# NOTE: poppler-utils and tesseract-ocr are Linux system packages, not pip
+# packages. Install via apt in the build command:
+#   apt-get update && apt-get install -y poppler-utils tesseract-ocr libzbar0
+# PyMuPDF above is used as a fallback when pdfimages/pdftotext are unavailable.
