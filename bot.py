@@ -49,7 +49,10 @@ ADMIN_USERNAME = "dhtechs_admin"
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 PAYMENT_PHONE = "0919545335"
-PRICE_PER_GEN = 50
+PRICE_PER_GEN = 50      # legacy default (OTP flow)
+PRICE_OTP = 50          # OTP flow price
+PRICE_PDF = 20          # PDF upload flow price
+REFERRAL_BONUS = 30     # ETB credited to referrer on referee's first approved top-up
 FREE_TRIALS = 1
 DB_PATH = "fayda_bot.db"
 
@@ -118,6 +121,8 @@ def init_db():
             wallet      INTEGER DEFAULT 0,
             trials_used INTEGER DEFAULT 0,
             template_id INTEGER DEFAULT 3,
+            referred_by INTEGER DEFAULT NULL,
+            referral_bonus_paid INTEGER DEFAULT 0,
             joined_at   TEXT    DEFAULT (datetime('now')),
             last_seen   TEXT    DEFAULT (datetime('now'))
         );
@@ -154,18 +159,34 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER DEFAULT NULL")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN referral_bonus_paid INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
     conn.commit()
     conn.close()
     log.info("✅ Database initialised.")
 
-def _db_upsert_user(chat_id, username, full_name):
+def _db_upsert_user(chat_id, username, full_name, referred_by=None):
     conn = _get_conn()
-    conn.execute("""
-        INSERT INTO users (chat_id,username,full_name) VALUES (?,?,?)
-        ON CONFLICT(chat_id) DO UPDATE SET
-            username=excluded.username, full_name=excluded.full_name,
-            last_seen=datetime('now')
-    """, (chat_id, username or "", full_name or ""))
+    existing = conn.execute("SELECT chat_id FROM users WHERE chat_id=?", (chat_id,)).fetchone()
+    if existing:
+        conn.execute("""
+            UPDATE users SET username=?, full_name=?, last_seen=datetime('now')
+            WHERE chat_id=?
+        """, (username or "", full_name or "", chat_id))
+    else:
+        conn.execute("""
+            INSERT INTO users (chat_id,username,full_name,referred_by)
+            VALUES (?,?,?,?)
+        """, (chat_id, username or "", full_name or "",
+              referred_by if (referred_by and referred_by != chat_id) else None))
     conn.commit()
     conn.close()
 
@@ -181,11 +202,11 @@ def _db_set_template(chat_id, template_id):
     conn.commit()
     conn.close()
 
-def _db_can_generate(chat_id):
+def _db_can_generate(chat_id, price=PRICE_PER_GEN):
     u = _db_get_user(chat_id)
-    return u and (u["trials_used"] < FREE_TRIALS or u["wallet"] >= PRICE_PER_GEN)
+    return u and (u["trials_used"] < FREE_TRIALS or u["wallet"] >= price)
 
-def _db_deduct(chat_id):
+def _db_deduct(chat_id, price=PRICE_PER_GEN):
     conn = _get_conn()
     u = conn.execute("SELECT * FROM users WHERE chat_id=?", (chat_id,)).fetchone()
     if not u:
@@ -201,7 +222,7 @@ def _db_deduct(chat_id):
         conn.close()
         return "trial", remaining
     else:
-        new_w = u["wallet"] - PRICE_PER_GEN
+        new_w = u["wallet"] - price
         conn.execute("UPDATE users SET wallet=? WHERE chat_id=?", (new_w, chat_id))
         conn.execute("INSERT INTO generations (chat_id,username,template_id) VALUES (?,?,?)",
                      (chat_id, u["username"], tid))
@@ -243,6 +264,43 @@ def _db_set_wallet(chat_id, amount):
     conn.execute("UPDATE users SET wallet=? WHERE chat_id=?", (amount, chat_id))
     conn.commit()
     conn.close()
+
+def _db_get_referral_info(chat_id):
+    """Return (referred_by, referral_bonus_paid, invited_count, total_earned)."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT referred_by, referral_bonus_paid FROM users WHERE chat_id=?",
+        (chat_id,)).fetchone()
+    invited = conn.execute(
+        "SELECT COUNT(*) FROM users WHERE referred_by=?", (chat_id,)).fetchone()[0]
+    earned = conn.execute(
+        "SELECT COUNT(*) FROM users WHERE referred_by=? AND referral_bonus_paid=1",
+        (chat_id,)).fetchone()[0]
+    conn.close()
+    if not row:
+        return None, 0, invited, earned * REFERRAL_BONUS
+    return row["referred_by"], row["referral_bonus_paid"], invited, earned * REFERRAL_BONUS
+
+def _db_reward_referrer_if_eligible(chat_id):
+    """
+    Called when a user's top-up payment is approved.
+    If this user was referred and the referrer bonus hasn't been paid yet,
+    credit REFERRAL_BONUS ETB to the referrer and mark as paid.
+    Returns referrer_chat_id if a bonus was paid, else None.
+    """
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT referred_by, referral_bonus_paid FROM users WHERE chat_id=?",
+        (chat_id,)).fetchone()
+    if not row or not row["referred_by"] or row["referral_bonus_paid"]:
+        conn.close()
+        return None
+    referrer_id = row["referred_by"]
+    conn.execute("UPDATE users SET wallet=wallet+? WHERE chat_id=?", (REFERRAL_BONUS, referrer_id))
+    conn.execute("UPDATE users SET referral_bonus_paid=1 WHERE chat_id=?", (chat_id,))
+    conn.commit()
+    conn.close()
+    return referrer_id
 
 def _db_pending_payments():
     conn = _get_conn()
@@ -870,7 +928,7 @@ def user_menu():
         [KeyboardButton("🪪 Generate ID Card"), KeyboardButton("📄 Upload PDF")],
         [KeyboardButton("🎨 Choose Template"), KeyboardButton("🖨️ A4 Converter")],
         [KeyboardButton("💳 My Wallet"), KeyboardButton("💰 Top Up")],
-        [KeyboardButton("📞 Support")],
+        [KeyboardButton("🎁 Invite & Earn"), KeyboardButton("📞 Support")],
     ], resize_keyboard=True)
 
 def admin_menu():
@@ -926,7 +984,17 @@ async def safe_send_photo(bot, chat_id, photo, caption=None, **kw):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _db_upsert_user, u.id, u.username, u.full_name)
+
+    # ── Referral: /start ref_<chat_id> ─────────────────────────────────────
+    referred_by = None
+    if context.args:
+        arg = context.args[0].strip()
+        if arg.startswith("ref_"):
+            ref_part = arg[4:]
+            if ref_part.isdigit():
+                referred_by = int(ref_part)
+
+    await loop.run_in_executor(None, _db_upsert_user, u.id, u.username, u.full_name, referred_by)
     user = await loop.run_in_executor(None, _db_get_user, u.id)
 
     if u.username and u.username.lower() == ADMIN_USERNAME.lower():
@@ -954,9 +1022,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_icon = "🟢"
     else:
         birr = user["wallet"]
-        gens = birr // PRICE_PER_GEN
+        otp_gens = birr // PRICE_OTP
+        pdf_gens = birr // PRICE_PDF
         status_icon = "🟡" if birr > 0 else "🔴"
-        status_line = f"💳 <b>Wallet Balance:</b> {birr} ETB\n   🪪 Can generate: <b>{gens}</b> ID card(s)"
+        status_line = (f"💳 <b>Wallet Balance:</b> {birr} ETB\n"
+                       f"   🪪 OTP cards: <b>{otp_gens}</b> | 📄 PDF cards: <b>{pdf_gens}</b>")
 
     await update.message.reply_text(
         f"🇪🇹 <b>ሰላም፣ {u.first_name}!</b>  Welcome to Fayda ID Bot\n"
@@ -968,7 +1038,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🎨 <b>Current Template:</b> #{tid} — {tname}\n"
         f"   (Each template gives Color + Grayscale output)\n\n"
-        f"💵 <b>Price:</b> {PRICE_PER_GEN} ETB / generation\n"
+        f"💵 <b>Price:</b> OTP flow {PRICE_OTP} ETB | PDF flow {PRICE_PDF} ETB\n"
         f"📱 <b>TeleBirr:</b> <code>{PAYMENT_PHONE}</code>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "👇 <b>Choose an option below to get started!</b>",
@@ -1082,7 +1152,7 @@ async def start_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _db_upsert_user, u.id, u.username, u.full_name)
 
-    can = await loop.run_in_executor(None, _db_can_generate, u.id)
+    can = await loop.run_in_executor(None, _db_can_generate, u.id, PRICE_OTP)
     if not can:
         has_pending = await loop.run_in_executor(None, _db_has_pending, u.id)
         if has_pending:
@@ -1099,7 +1169,7 @@ async def start_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ <b>Insufficient Balance</b>\n\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"💰 You need at least <b>{PRICE_PER_GEN} ETB</b>\n"
+                f"💰 You need at least <b>{PRICE_OTP} ETB</b>\n"
                 "   to generate an ID card.\n\n"
                 "📱 Tap <b>💰 Top Up</b> to add funds\n"
                 f"   via TeleBirr: <code>{PAYMENT_PHONE}</code>\n"
@@ -1209,12 +1279,12 @@ async def recv_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rendered = await loop.run_in_executor(
             None, merge_to_template_all_outputs, api_data, unique_id, tid)
 
-        deduct_type, remaining = await loop.run_in_executor(None, _db_deduct, update.effective_user.id)
+        deduct_type, remaining = await loop.run_in_executor(None, _db_deduct, update.effective_user.id, PRICE_OTP)
         if deduct_type == "trial":
             bal_note = f"🎁 Free trial used! <b>{remaining}</b> trial(s) remaining." if remaining > 0 else "🎁 Last free trial used.\nTap 💰 Top Up to continue!"
         else:
-            gens_left = remaining // PRICE_PER_GEN
-            bal_note = f"💳 Wallet: <b>{remaining} ETB</b>  ({gens_left} generation(s) left)"
+            gens_left = remaining // PRICE_OTP
+            bal_note = f"💳 Wallet: <b>{remaining} ETB</b>  ({gens_left} OTP generation(s) left)"
 
         await msg.delete()
 
@@ -1314,12 +1384,13 @@ async def start_topup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "💰 <b>Top Up Your Wallet</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 <b>Step 1:</b> Send ETB to:\n"
+        f"📌 <b>Step 1:</b> Send any amount of ETB to:\n"
         f"   📱 TeleBirr: <code>{PAYMENT_PHONE}</code>\n\n"
-        f"   • Minimum: <b>{PRICE_PER_GEN} ETB</b> = 1 ID card\n"
-        f"   • 100 ETB = 2 cards | 150 ETB = 3 cards\n\n"
+        f"   💵 OTP ID Generation: <b>{PRICE_OTP} ETB</b>\n"
+        f"   📄 PDF ID Generation: <b>{PRICE_PDF} ETB</b>\n\n"
         f"📌 <b>Step 2:</b> Screenshot the confirmation\n\n"
-        f"📌 <b>Step 3:</b> Send the screenshot here 👇\n"
+        f"📌 <b>Step 3:</b> Send the screenshot here, with the\n"
+        f"   amount you sent as the caption 👇\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "⚡ Approval is usually within minutes!",
         parse_mode=ParseMode.HTML, reply_markup=cancel_kb())
@@ -1342,10 +1413,10 @@ async def recv_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
     file_id = photo.file_id
     loop = asyncio.get_running_loop()
-    amount = PRICE_PER_GEN
+    amount = PRICE_OTP
     caption = (update.message.caption or "").strip()
-    if caption.isdigit():
-        amount = max(PRICE_PER_GEN, int(caption))
+    if caption.isdigit() and int(caption) > 0:
+        amount = int(caption)
     pid = await loop.run_in_executor(None, _db_add_payment, u.id, u.username, u.full_name, amount, file_id)
     admin_id = get_admin_chat_id()
     if admin_id:
@@ -1549,20 +1620,35 @@ async def cb_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = payment["amount"]
         await loop.run_in_executor(None, _db_update_payment, pid, "approved", admin_name)
         await loop.run_in_executor(None, _db_add_wallet, payment["chat_id"], amount)
-        gens = amount // PRICE_PER_GEN
+        otp_gens = amount // PRICE_OTP
+        pdf_gens = amount // PRICE_PDF
         await safe_send(context.bot, payment["chat_id"],
             f"🎉 <b>Payment Approved!</b>\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"✅ <b>{amount} ETB</b> added to your wallet!\n"
-            f"🪪 You can now generate <b>{gens}</b> ID card(s)\n\n"
-            f"👇 Tap <b>🪪 Generate ID Card</b> to start!\n"
+            f"🪪 OTP ID cards possible: <b>{otp_gens}</b> ({PRICE_OTP} ETB each)\n"
+            f"📄 PDF ID cards possible: <b>{pdf_gens}</b> ({PRICE_PDF} ETB each)\n\n"
+            f"👇 Tap <b>🪪 Generate ID Card</b> or <b>📄 Upload PDF</b> to start!\n"
             f"━━━━━━━━━━━━━━━━━━━━━━",
             parse_mode=ParseMode.HTML)
+
+        # ── Referral bonus: credit referrer on referee's first approved top-up ──
+        referrer_id = await loop.run_in_executor(None, _db_reward_referrer_if_eligible, payment["chat_id"])
+        if referrer_id:
+            await safe_send(context.bot, referrer_id,
+                f"🎁 <b>Referral Bonus!</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ <b>{REFERRAL_BONUS} ETB</b> added to your wallet!\n"
+                f"👤 A friend you invited just topped up.\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━",
+                parse_mode=ParseMode.HTML)
+
         await query.edit_message_caption(
             f"✅ <b>APPROVED — Payment #{pid}</b>\n\n"
             f"👤 {payment['full_name']} (@{payment['username']})\n"
-            f"💵 {amount} ETB → +{gens} generation(s)\n"
-            f"👑 By: @{admin_name}")
+            f"💵 {amount} ETB"
+            + (f" → +{REFERRAL_BONUS} ETB referral bonus sent to referrer" if referrer_id else "")
+            + f"\n👑 By: @{admin_name}")
     elif action == "pay_no":
         await loop.run_in_executor(None, _db_update_payment, pid, "rejected", admin_name)
         await safe_send(context.bot, payment["chat_id"],
@@ -1639,9 +1725,10 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["👥 <b>Recent Users (Top 25)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"]
     for u in users:
         trials_left = max(0, FREE_TRIALS - u["trials_used"])
-        gens = u["wallet"] // PRICE_PER_GEN
+        otp_g = u["wallet"] // PRICE_OTP
+        pdf_g = u["wallet"] // PRICE_PDF
         tid = u.get("template_id", 3) or 3
-        lines.append(f"• <b>{u['full_name']}</b> (@{u['username'] or 'N/A'})\n  🆔 <code>{u['chat_id']}</code> | 💳 {u['wallet']} ETB ({gens}gen) | 🎁 {trials_left} trial | 🎨 T#{tid}")
+        lines.append(f"• <b>{u['full_name']}</b> (@{u['username'] or 'N/A'})\n  🆔 <code>{u['chat_id']}</code> | 💳 {u['wallet']} ETB (OTP:{otp_g}/PDF:{pdf_g}) | 🎁 {trials_left} trial | 🎨 T#{tid}")
     msg = "\n".join(lines)
     if len(msg) > 4000:
         for i in range(0, len(lines), 10):
@@ -1694,13 +1781,14 @@ async def recv_edit_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_bal = int(amount_str)
             action = f"📌 Set to {new_bal} ETB"
         await loop.run_in_executor(None, _db_set_wallet, chat_id, new_bal)
-        gens = new_bal // PRICE_PER_GEN
+        otp_g = new_bal // PRICE_OTP
+        pdf_g = new_bal // PRICE_PDF
         await update.message.reply_text(
             f"✅ <b>Wallet Updated!</b>\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 {user['full_name']} (@{user['username'] or 'N/A'})\n"
             f"🔧 {action}\n"
-            f"💳 New Balance: <b>{new_bal} ETB</b> ({gens} gen)\n"
+            f"💳 New Balance: <b>{new_bal} ETB</b> (OTP:{otp_g}/PDF:{pdf_g})\n"
             f"━━━━━━━━━━━━━━━━━━━━━━",
             parse_mode=ParseMode.HTML, reply_markup=admin_menu())
         await safe_send(context.bot, chat_id,
@@ -1764,25 +1852,51 @@ async def show_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await loop.run_in_executor(None, _db_upsert_user, u.id, u.username, u.full_name)
     user = await loop.run_in_executor(None, _db_get_user, u.id)
     trials_left = max(0, FREE_TRIALS - user["trials_used"])
-    gens = user["wallet"] // PRICE_PER_GEN
-    total_gens = trials_left + gens
+    otp_gens = user["wallet"] // PRICE_OTP
+    pdf_gens = user["wallet"] // PRICE_PDF
     tid = user.get("template_id", 3) or 3
     tname = TEMPLATES.get(tid, TEMPLATES[3])["name"]
-    status = "🟢 Ready to generate!" if total_gens > 0 else "🔴 Add funds to generate"
+    status = "🟢 Ready to generate!" if (trials_left > 0 or user["wallet"] > 0) else "🔴 Add funds to generate"
     await update.message.reply_text(
         f"💳 <b>Your Wallet</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 {u.full_name}\n\n"
         f"🎁 Free Trials:   <b>{trials_left}</b> remaining\n"
         f"💰 Balance:       <b>{user['wallet']} ETB</b>\n"
-        f"🪪 Can Generate:  <b>{total_gens}</b> ID card(s)\n\n"
+        f"🪪 OTP Cards:     <b>{otp_gens}</b> (at {PRICE_OTP} ETB each)\n"
+        f"📄 PDF Cards:     <b>{pdf_gens}</b> (at {PRICE_PDF} ETB each)\n\n"
         f"🎨 Active Template: <b>#{tid} — {tname}</b>\n\n"
         f"{status}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💵 Rate: {PRICE_PER_GEN} ETB per generation",
+        f"💵 OTP Flow: {PRICE_OTP} ETB | PDF Flow: {PRICE_PDF} ETB",
         parse_mode=ParseMode.HTML)
 
-async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _db_upsert_user, u.id, u.username, u.full_name)
+
+    bot_username = context.bot.username
+    link = f"https://t.me/{bot_username}?start=ref_{u.id}"
+
+    _, _, invited, earned = await loop.run_in_executor(None, _db_get_referral_info, u.id)
+
+    await update.message.reply_text(
+        "🎁 <b>Invite & Earn</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 Earn <b>{REFERRAL_BONUS} ETB</b> for every friend\n"
+        "   who joins using your link and tops up\n"
+        "   their wallet for the first time!\n\n"
+        "🔗 <b>Your Invite Link:</b>\n"
+        f"<code>{link}</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 Friends Invited: <b>{invited}</b>\n"
+        f"💰 Total Earned:    <b>{earned} ETB</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📤 Share this link with friends to start earning!",
+        parse_mode=ParseMode.HTML)
+
+
     await update.message.reply_text(
         "📞 <b>Support Center</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1859,6 +1973,8 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text == "💳 My Wallet":
         await show_wallet(update, context)
+    elif text == "🎁 Invite & Earn":
+        await show_invite(update, context)
     elif text == "📞 Support":
         await show_support(update, context)
     elif text == "🎨 Choose Template":
@@ -1886,7 +2002,7 @@ async def start_pdf_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _db_upsert_user, u.id, u.username, u.full_name)
 
-    can = await loop.run_in_executor(None, _db_can_generate, u.id)
+    can = await loop.run_in_executor(None, _db_can_generate, u.id, PRICE_PDF)
     if not can:
         has_pending = await loop.run_in_executor(None, _db_has_pending, u.id)
         if has_pending:
@@ -1897,7 +2013,7 @@ async def start_pdf_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(
                 "❌ <b>Insufficient Balance</b>\n\n"
-                f"💰 You need at least <b>{PRICE_PER_GEN} ETB</b> to generate a card.\n"
+                f"💰 You need at least <b>{PRICE_PDF} ETB</b> to generate a card from PDF.\n"
                 "📱 Tap <b>💰 Top Up</b> to add funds.",
                 parse_mode=ParseMode.HTML)
         return ConversationHandler.END
@@ -2137,7 +2253,7 @@ async def recv_pdf_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         deduct_type, remaining = await loop.run_in_executor(
-            None, _db_deduct, update.effective_user.id
+            None, _db_deduct, update.effective_user.id, PRICE_PDF
         )
         if deduct_type == "trial":
             bal_note = (
@@ -2146,8 +2262,8 @@ async def recv_pdf_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else "🎁 Last free trial used.\nTap 💰 Top Up to continue!"
             )
         else:
-            gens_left = remaining // PRICE_PER_GEN
-            bal_note = f"💳 Wallet: <b>{remaining} ETB</b>  ({gens_left} generation(s) left)"
+            gens_left = remaining // PRICE_PDF
+            bal_note = f"💳 Wallet: <b>{remaining} ETB</b>  ({gens_left} PDF generation(s) left)"
 
         await msg.delete()
 
@@ -2411,7 +2527,7 @@ def main():
     log.info("╚══════════════════════════════════════╝")
     log.info(f"  👑 Admin: @{ADMIN_USERNAME}")
     log.info(f"  📱 Payment: {PAYMENT_PHONE}")
-    log.info(f"  💵 Price: {PRICE_PER_GEN} ETB/gen | 🎁 Trials: {FREE_TRIALS}")
+    log.info(f"  💵 Price: OTP {PRICE_OTP} ETB / PDF {PRICE_PDF} ETB | 🎁 Trials: {FREE_TRIALS} | 🎁 Referral: {REFERRAL_BONUS} ETB")
     log.info(f"  🎨 Templates: {len(TEMPLATES)} (templates 1–4)")
     _log_system_deps()
     import time
