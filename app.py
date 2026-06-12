@@ -674,57 +674,30 @@ def _build_sign_field(data: dict) -> str:
 
 
 def generate_qr_bytes(data: dict) -> bytes:
-    """
-    Generate a QR code that matches the official Fayda card QR.
-
-    The real Fayda QR encodes the JWT token returned by the API —
-    that is the ONLY payload the Fayda scanner validates.
-
-    Payload priority:
-      1. Full 3-part JWT  (header.claims.signature)  — best: fully verifiable
-      2. header..signature  (claims stripped)         — valid abbreviated form
-      3. Fallback colon-delimited identity string     — if no JWT available
-
-    The photo thumbnail embedded in QR caused oversized QR codes and is
-    removed — the Fayda scanner does not use it.
-    """
-    uin       = str(data.get("uin", ""))
-    fan       = str(data.get("uniqueId", uin))
     name      = data.get("fullName", {}).get("eng", "")
     dob       = data.get("dateOfBirth", "")
     gender    = data.get("gender", {}).get("eng", "").lower()
+    uin       = str(data.get("uin", ""))
+    photo_b64 = data.get("photo", "")
+    fan       = str(data.get("uniqueId", uin))
+
     gender_code = "F" if "female" in gender else "M"
-    dob_qr    = format_dob_qr(dob)
+    dob_qr      = format_dob_qr(dob)
+    photo_part  = _encode_photo_webp(photo_b64) if photo_b64 else ""
+    sign_field  = _build_sign_field(data)
 
-    # ── Build QR payload ──────────────────────────────────────────────────────
-    # Try to use the real JWT so the QR is scannable by the official Fayda app.
-    qr_jwt   = data.get("qr_jwt", "").strip()
-    qr_sign  = data.get("qr_sign", "").strip()
-    raw_token = qr_jwt or qr_sign or ""
+    def _payload(with_photo: bool) -> str:
+        photo = photo_part if (with_photo and photo_part) else ""
+        return (f"{photo}:DLT:{name}:V:4:G:{gender_code}"
+                f":A:{fan}:D:{dob_qr}:SIGN:{sign_field}")
 
-    payload = ""
+    payload = _payload(with_photo=True)
+    if len(payload.encode("utf-8")) > 2900:
+        payload = _payload(with_photo=False)
 
-    if raw_token:
-        parts = raw_token.split(".")
-        if len(parts) == 3 and all(parts):
-            # Full valid JWT — use as-is (most scannable form)
-            payload = raw_token
-        elif len(parts) >= 2 and parts[0]:
-            # Abbreviated header..signature form
-            sig = parts[2] if len(parts) == 3 else ""
-            payload = f"{parts[0]}..{sig}" if sig else parts[0]
-
-    if not payload:
-        # Fallback: colon-delimited identity string (no photo thumbnail —
-        # keeps QR small and scannable)
-        sign_field = _build_sign_field(data)
-        payload = (f"DLT:{name}:V:4:G:{gender_code}"
-                   f":A:{fan}:D:{dob_qr}:SIGN:{sign_field}")
-
-    # ── Render QR ─────────────────────────────────────────────────────────────
     qr = qrcode.QRCode(
         version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,  # M > L: more robust scan
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
         box_size=10, border=2,
     )
     qr.add_data(payload.encode("utf-8"))
