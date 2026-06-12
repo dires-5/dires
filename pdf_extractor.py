@@ -580,7 +580,7 @@ def _extract_fin_from_card_back(card_back_img: "Image.Image", pdf_bytes: bytes =
         try:
             import fitz as _fitz
             doc = _fitz.open(stream=pdf_bytes, filetype="pdf")
-            page = doc[0]
+            page = doc[-1]  # last page = card back (doc[0] = card front)
             mat = _fitz.Matrix(6.0, 6.0)   # ~432 DPI — sharp enough for OCR
             pix = page.get_pixmap(matrix=mat)
             img = _PILImage.frombytes("RGB", [pix.width, pix.height], pix.samples)
@@ -597,17 +597,29 @@ def _extract_fin_from_card_back(card_back_img: "Image.Image", pdf_bytes: bytes =
         except Exception as e:
             print(f"[fin] Layer-2 error: {e}")
 
-    # ── Layer 3: embedded card-back JPEG → pytesseract ────────────────────────
+    # ── Layer 3: card_back_img → pytesseract (wide sweep) ────────────────────
     #
-    # When the card-back is an embedded JPEG (1968×3150 px typical), the FIN
-    # row sits at y: 62%–67% of the JPEG height — this differs from the full-
-    # page PDF render (57%–60%) because the JPEG is cropped to the card-back
-    # panel only, so coordinates shift downward.  Confirmed on real IDs.
+    # card_back_img may be:
+    #   A) An embedded card-back JPEG (~1968x3150, aspect ~0.62) — FIN at y 62-67%
+    #   B) A full-page fitz render (~2500x3500, aspect ~0.71) — FIN at y 57-60%
+    #
+    # Detect by aspect ratio and try matching range first, then full sweep.
     try:
         cw, ch = card_back_img.size
-        for y0, y1 in [(0.620, 0.670), (0.605, 0.685), (0.590, 0.700), (0.570, 0.720)]:
+        aspect = cw / ch
+        print(f"[fin] Layer-3 card_back_img size={cw}x{ch} aspect={aspect:.3f}")
+
+        if aspect < 0.67:
+            # Narrow image = card-back only JPEG: FIN is lower in the frame
+            y_ranges = [(0.620, 0.670), (0.605, 0.690), (0.590, 0.710),
+                        (0.555, 0.730), (0.540, 0.750)]
+        else:
+            # Wider image = full-page render: same y-range as Layer 2
+            y_ranges = [(0.570, 0.596), (0.555, 0.615), (0.540, 0.630),
+                        (0.620, 0.670), (0.590, 0.700)]
+
+        for y0, y1 in y_ranges:
             strip = card_back_img.crop((int(cw * 0.55), int(ch * y0), cw, int(ch * y1)))
-            # Upscale small strips so tesseract has enough pixels
             sw, sh = strip.size
             if sh < 80:
                 scale = max(1, 80 // sh + 1)
@@ -615,8 +627,9 @@ def _extract_fin_from_card_back(card_back_img: "Image.Image", pdf_bytes: bytes =
             ocr_text = _ocr_strip(strip)
             result = _parse(ocr_text)
             if result:
-                print(f"[fin] Layer-3 (card JPEG y={y0:.3f}-{y1:.3f}) SUCCESS: {result}")
+                print(f"[fin] Layer-3 (y={y0:.3f}-{y1:.3f}) SUCCESS: {result}")
                 return result
+        print(f"[fin] Layer-3 exhausted all y-ranges for aspect={aspect:.3f}")
     except Exception as e:
         print(f"[fin] Layer-3 error: {e}")
 

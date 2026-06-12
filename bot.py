@@ -44,7 +44,7 @@ from pdf_extractor import extract_from_fayda_pdf
 # ══════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
 # ══════════════════════════════════════════════════════════════
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8878628793:AAHeQh372w5GFdGx6PAK5SlY4Mw_bL19B48")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8152344764:AAE_IiYZZO9Bg__lXykuGD5YkNjq-zZ0KcQ")
 ADMIN_USERNAME = "dhtechs_admin"
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
@@ -2377,6 +2377,33 @@ def build_app():
     return app
 
 
+def _log_system_deps():
+    """Log availability of critical system dependencies at startup."""
+    import shutil, subprocess
+    # tesseract
+    tess = shutil.which("tesseract")
+    if tess:
+        try:
+            v = subprocess.check_output([tess, "--version"], stderr=subprocess.STDOUT).decode().splitlines()[0]
+            log.info(f"  ✅ tesseract: {v} @ {tess}")
+        except Exception as e:
+            log.info(f"  ✅ tesseract found @ {tess} (version check failed: {e})")
+    else:
+        log.warning("  ❌ tesseract NOT FOUND in PATH — FIN OCR will fail!")
+    # pytesseract
+    try:
+        import pytesseract
+        log.info(f"  ✅ pytesseract: {pytesseract.get_tesseract_version()}")
+    except Exception as e:
+        log.warning(f"  ❌ pytesseract error: {e}")
+    # fitz (PyMuPDF)
+    try:
+        import fitz
+        log.info(f"  ✅ PyMuPDF (fitz): {fitz.version}")
+    except Exception as e:
+        log.warning(f"  ❌ PyMuPDF error: {e}")
+
+
 def main():
     log.info("╔══════════════════════════════════════╗")
     log.info("║  🇪🇹 Fayda ID Bot — Starting...      ║")
@@ -2386,11 +2413,29 @@ def main():
     log.info(f"  📱 Payment: {PAYMENT_PHONE}")
     log.info(f"  💵 Price: {PRICE_PER_GEN} ETB/gen | 🎁 Trials: {FREE_TRIALS}")
     log.info(f"  🎨 Templates: {len(TEMPLATES)} (templates 1–4)")
-    build_app().run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
-        close_loop=False,
-    )
+    _log_system_deps()
+    import time
+    from telegram.error import Conflict as _Conflict
+    app = build_app()
+    for attempt in range(1, 6):
+        try:
+            import asyncio as _asyncio
+            async def _pre_start():
+                await app.bot.delete_webhook(drop_pending_updates=True)
+                log.info("  ✅ Webhook cleared, starting polling...")
+            _asyncio.get_event_loop().run_until_complete(_pre_start())
+            app.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+                close_loop=False,
+            )
+            break
+        except _Conflict as e:
+            wait = attempt * 5
+            log.warning(f"  ⚠️ Conflict attempt {attempt}/5 — retrying in {wait}s: {e}")
+            time.sleep(wait)
+    else:
+        log.error("  ❌ Could not start polling after 5 attempts.")
 
 
 if __name__ == "__main__":
